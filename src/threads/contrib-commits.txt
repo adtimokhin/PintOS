@@ -1,0 +1,9 @@
+70% Partner #1: Aybala Esmer, aybala
+30% Partner #2: Aleksandr Timokhin, adtimokhin
+
+24.05, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/06c0e7f8e3cc4b7e01c02d85f36fb010e29f4ce4
+25.93, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/d6cfa6c183f72fe9ce4f319d27b2a45db28b464c
+48.9420, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/e118de2d16f76a5c50e0151c7797be1a129e35fc
+59.6466, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/874acd714078b41a49a6d51466c36acf8bdbdaac
+94.733, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/38288758b5879a4fa862263404be20b615eef136
+100.00, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/cf805c3353ddf9cfb3b8499e353fda712fe5edd4

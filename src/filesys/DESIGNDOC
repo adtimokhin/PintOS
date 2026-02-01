@@ -1,0 +1,341 @@
+       	       	     +-------------------------+
+		     |		CS 140	       |
+		     | PROJECT 4: FILE SYSTEMS |
+		     |	   DESIGN DOCUMENT     |
+		     +-------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+50% Partner #1: Aybala Esmer, aybala
+50% Partner #2: Sasha Timokhin, adtimokhin
+Expected score: 90.0000
+
+90.0000, Commit Links:
+6.2021, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/5240eb206b69bc536c2f330463c54f2f96932aac
+28.9433, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/a09f36635d688c0a06873e2fdb0e129d15007602,
+27.2894, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/699f12cff5c044e235c0eefb476da89b586cdab8
+53.8897, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/062865a0de66ab44071e6b9143b16b404b3bf30a
+63.8131, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/5f5a54e1b82ec34abea281c770f03fb0ec9158e7
+87.6569, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/ec8df68755c9d714640da38acffb59917b8adb02
+90.0000, https://proj.cs.uchicago.edu/ayba-sash-cs230-aut-25/group_repo/-/commit/077ce8fa48086a6584ae8bafe06ee03773232702
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+		     INDEXED AND EXTENSIBLE FILES
+		     ============================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+```c
+struct inode_disk
+  {
+    block_sector_t sectors[SECTOR_CNT]; /* Sectors. */
+    enum inode_type type;               /* FILE_INODE or DIR_INODE. */
+    off_t length;                       /* File size in bytes. */
+    unsigned magic;                     /* Magic number. */
+    // Indixes
+    uint32_t direct_index;              /* Index of direct block */
+    uint32_t indirect_index;            /* Index of indirect block */
+    uint32_t dbl_indirect_index;        /* Index of double indirect block */
+    // Unused
+    uint32_t unused[108];               /* Unused data to make block 512 bytes */
+  };
+
+struct inode
+  {
+    struct list_elem elem;              /* Element in inode list. */
+    block_sector_t sector;              /* Sector number of disk location. */
+    int open_cnt;                       /* Number of openers. */
+    bool removed;                       /* True if deleted, false otherwise. */
+    struct lock lock;                   /* Protects the inode. */
+
+    /* Denying writes. */
+    struct lock deny_write_lock;        /* Protects members below. */
+    struct condition no_writers_cond;   /* Signaled when no writers. */
+    int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
+    int writer_cnt;                     /* Number of writers. */
+
+    unsigned mem_magic;					/* Detect bogus inode pointers. Uneccessary for inode operation, but it helped me to debug stuff*/
+  };
+
+  #define INODE_MEM_MAGIC 0xC0FFEE01u // Magic number I used to debug my inodes
+```
+
+>> A2: What is the maximum size of a file supported by your inode
+>> structure?  Show your work.
+
+We support:
+
+* DIRECT_CNT = 12 direct data sectors.
+* INDIRECT_CNT = 1 single-indirect root sector.
+* DBL_INDIRECT_CNT = 1 double-indirect root sector.
+
+Each indirect sector holds PTRS_PER_SECTOR pointers. On Pintos, BLOCK_SECTOR_SIZE = 512 and sizeof(block_sector_t) = 4, so `PTRS_PER_SECTOR = 512 / 4 = 128`.
+
+Total number of addressable data sectors:
+* Direct: 12.
+* Single-indirect: 1 * PTRS_PER_SECTOR = 128.
+* Double-indirect: 1 * PTRS_PER_SECTOR * PTRS_PER_SECTOR = 128 * 128 = 16384.
+
+Total data sectors:
+`12 + 128 + 16384 = 16524 sectors.`
+
+Each sector is 512 bytes, so maximum file size in bytes:
+`16524 * 512 = 8,460,288 bytes ≈ 8.06 MiB`.
+
+---- SYNCHRONIZATION ----
+
+>> A3: Explain how your code avoids a race if two processes attempt to
+>> extend a file at the same time.
+Data and metadata updates happen through `inode_write_at()` and `extend_file()`.
+
+`inode_write_at()` computes the final offset and writes data for each block. After finishing all block writes, it calls `extend_file(inode, offset)` to increase `disk_inode->length` and update the index fields.
+
+`extend_file()` treats the *on-disk inode* as the single source of truth: it rereads the inode, compares length, and only increases it. It recomputes `direct_index`, `indirect_index`, and `dbl_indirect_index` based on the new length.
+
+Sector allocation itself is serialized by the `free map`:
+
+`get_data_block()` uses `free_map_allocate()` and `free_map_release()`, which are protected by `free_map_lock`, so two concurrent extensions cannot allocate the same sector.
+
+>> A4: Suppose processes A and B both have file F open, both
+>> positioned at end-of-file.  If A reads and B writes F at the same
+>> time, A may read all, part, or none of what B writes.  However, A
+>> may not read data other than what B writes, e.g. if B writes
+>> nonzero data, A is not allowed to see all zeros.  Explain how your
+>> code avoids this race.
+inode_write_at() writes data to the target sectors before extending the file length. It does the following:
+
+1) Allocates or finds the sector via `get_data_block()`.
+
+2) Copies user data into a temporary buffer.
+
+3) Calls `block_write(fs_device, data_sector, block)`.
+
+Only after all requested bytes are written does it call `extend_file(inode, offset)`, which updates `disk_inode->length`.
+
+`inode_read_at()` computes `inode_left = inode_length(inode) - offset` and never reads beyond the current length. If `inode_left <= 0`, it stops.
+
+It cannot see uninitialized “garbage” beyond length, because the length update is the last step of the write path. Reads never exceed the published inode_length.
+
+>> A5: Explain how your synchronization design provides "fairness".
+>> File access is "fair" if readers cannot indefinitely block writers
+>> or vice versa.  That is, many processes reading from a file cannot
+>> prevent forever another process from writing the file, and many
+>> processes writing to a file cannot prevent another process forever
+>> from reading the file.
+* Sector allocation and free map operations are serialized via a single `free_map_lock`.
+
+* Deny-write semantics are implemented with `deny_write_lock` and `no_writers_cond` per inode.
+
+* Directory operations (liek `dir_add`, `dir_remove`, `dir_lookup`) use `inode_lock(dir->inode)` to serialize modifications to a directory’s entries.
+
+* `inode_deny_write()` increments `deny_write_cnt` and then waits while `writer_cnt > 0` using the condition variable. Writers decrement `writer_cnt` and signal `no_writers_cond` when the last writer exits. This ensures that a thread trying to deny writes eventually gets a chance once current writers finish.
+
+* We do not implement an explicit readers-writer lock at the inode level. Instead, the Pintos scheduler and short critical sections prevent starvation: no thread holds free_map_lock or an inode lock for long, and all operations are bounded work.
+
+* Readers do not take long-term exclusive locks, so a writer cannot be blocked indefinitely by readers, and vice versa. deny_write_cnt only affects new writers; it does not block readers at all.
+
+---- RATIONALE ----
+
+>> A6: Is your inode structure a multilevel index?  If so, why did you
+>> choose this particular combination of direct, indirect, and doubly
+>> indirect blocks?  If not, why did you choose an alternative inode
+>> structure, and what advantages and disadvantages does your
+>> structure have, compared to a multilevel index?
+
+We went for a multi-level index structure. We have direct (12), indirect (1), and dbl indirect (1) blocks. Such a structure is more favourable, in our opinion. On one side, it provides direct (and thus faster) access for smaller files (up to ~6 KiB) whilst also supports moderatelly large files.
+
+Additionally, adding a single indirect and a single double-indirect root (on top of the direct blocks) meets the project’s maximum file size requirement (~8 MiB) without complicating the on-disk format too much.
+
+It also allows for an easy extension of the maximum allowed file size, by allocating more indicies for the indirect blocks.
+
+Here are advantages of our approach:
+* Efficient random access: O(1) mapping from byte offset to sector via a small number of indirections.
+
+* Small metadata overhead for small files (only direct pointers used).
+
+Here are disadvantages of our approach:
+
+* Multilevel indexing adds some complexity in get_data_block() (different cases for direct, indirect, double-indirect) and in extend_file() bookkeeping of *_index.
+
+* For very large files, double indirection adds extra disk reads to follow the pointer levels.
+
+			    SUBDIRECTORIES
+			    ==============
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+```c
+  struct child_process {
+	// ... (all others as they were)
+    struct dir *parent_cwd;     /* parent's cwd */
+};
+
+struct file_descriptor{
+  // ... (all others as they were)
+
+   bool is_dir;				/* bool to identify if the fd is to a file or dir */
+   struct file *file_ref;	/* associated file reference */
+   struct dir  *dir_ref;	/* associated directory reference */
+};
+
+struct thread
+  {
+	// ... (all others as they were)
+    struct dir *cwd;		/* Current Working Directory (cwd) */
+  };
+```
+
+---- ALGORITHMS ----
+
+>> B2: Describe your code for traversing a user-specified path.  How
+>> do traversals of absolute and relative paths differ?
+
+We do that in `resolve_name_to_entry()` and `resolve_name_to_inode()`.
+
+The only difference is the initial directory:
+Absolute paths always start from `dir_open_root()`.
+Relative paths start from `thread_current()->cwd` (or root if `cwd == NULL`).
+
+Here is the algorithm:
+```text
+	0) If `name[0] == '/'` we start from the root: `dir_open_root()`.
+
+	1) Otherwise we start from the calling thread’s cwd (thread_current()->cwd),
+	falling back to the root directory if cwd is NULL (early boot / initial thread).
+
+	2) We repeatedly call get_next_part(part, &path) to split off the next component between slashes.
+	We skip leading slashes and treat a path of only slashes as the root.
+	Invalid components (too long) cause failure.
+
+	4) Special cases "." and "..":
+	".": dir is unchanged.
+	"..":
+		For the root directory we stay at root.
+		For other directories we look up the ".." entry and open the parent via dir_open(inode_open(parent_sector)).
+
+	5) For each component except the last, we:
+	Use `dir_lookup(dir, part, &inode)` to get the child.
+	Verify the child is a directory with `inode_get_type(inode)`.
+	Close the current dir and replace it with `dir_open(inode)`.
+
+	6) r`esolve_name_to_entry()` stops before the last name. It places the final component into base_name and returns the directory dir that should contain it (for create/remove). `resolve_name_to_inode()` calls `resolve_name_to_entry()`, then `dir_lookup(dir, base_name, &inode)` to return the final inode.
+```
+
+---- SYNCHRONIZATION ----
+
+>> B4: How do you prevent races on directory entries?  For example,
+>> only one of two simultaneous attempts to remove a single file
+>> should succeed, as should only one of two simultaneous attempts to
+>> create a file with the same name, and so on.
+We serialize directory modifications using the inode lock of the directory.
+
+We take `inode_lock(dir->inode)` before checking if name already exists and hold it while writing the new struct `dir_entry`. This guarantees that two concurrent `dir_adds` for the same name cannot both succeed: one will see the name as already taken.
+
+The lock is held while locating the entry and marking it not in use, so only one `dir_remove()` can successfully remove a given entry.
+
+Because all directory operations consistently take `inode_lock(dir->inode)` around their critical sections, modifications to the directory entry list are atomic with respect to each other.
+
+>> B5: Does your implementation allow a directory to be removed if it
+>> is open by a process or if it is in use as a process's current
+>> working directory?  If so, what happens to that process's future
+>> file system operations?  If not, how do you prevent it?
+* `dir_remove(dir, name)` only refuses to remove `"." or ".."`. It does not check whether the target directory is open or used as some thread’s cwd.
+
+* `inode_remove(inode)` marks the inode as `removed = true` but leaves the in-memory inode structure and any open struct dir/struct file references alive until their close functions are called.
+
+* A process whose current working directory is removed keeps a valid struct dir *cwd pointing at an inode whose removed flag is set. Future operations that traverse from that cwd will still be able to use existing open descriptors. And path resolution treats removed directories as non-traversable when resolving new paths.
+
+---- RATIONALE ----
+
+>> B6: Explain why you chose to represent the current directory of a
+>> process the way you did.
+
+We store the current directory as a pointer in each thread. Main reason being efficient path resolution. `resolve_name_to_entry()` and `resolve_name_to_inode()` can directly start from `thread_current()->cwd` for relative paths without extra lookups.
+
+			     BUFFER CACHE
+			     ============
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+N/A
+
+---- ALGORITHMS ----
+
+>> C2: Describe how your cache replacement algorithm chooses a cache
+>> block to evict.
+N/A
+
+>> C3: Describe your implementation of write-behind.
+N/A
+
+>> C4: Describe your implementation of read-ahead.
+N/A
+
+---- SYNCHRONIZATION ----
+
+>> C5: When one process is actively reading or writing data in a
+>> buffer cache block, how are other processes prevented from evicting
+>> that block?
+N/A
+
+>> C6: During the eviction of a block from the cache, how are other
+>> processes prevented from attempting to access the block?
+N/A
+
+---- RATIONALE ----
+
+>> C7: Describe a file workload likely to benefit from buffer caching,
+>> and workloads likely to benefit from read-ahead and write-behind.
+N/A
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+We would have liked it so that the extendible files were split into smaller jobs. To run any test for that part required implementing (AND TESTING) most of the code! We could not even make the most of the P2 tests to run until one commit, at which point our code was passing 60% of the tests...
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+Sure! The implementation of inodes.
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+I (Sasha) found it very misleading when the Ed post for the project said implementing 4-5 functions was enough to pass all of the P2 tests. That was not true.
+
+Also, it was misleading that `thread/init.c` was not on the list of the files that needed to be modified, when clearly it should be, as it is the only place where you can set the root directory for the main thread.
+
+I also found it extremely misleading that the files we were given to use in the project 4 had modified function declarations. When running `make` instruction I did not get any errors for the other parts of the code that I did not modify (mainly in the syscall.c and process.c).A function for file_sys_write caused an unecessary debugging pain. Telling the students that a declaration of a function that is already being implemented and used in P2 seems like a common courtesy.
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students in future quarters?
+
+>> Any other comments?
